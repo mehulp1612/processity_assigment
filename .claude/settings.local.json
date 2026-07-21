@@ -1,0 +1,23 @@
+{
+  "model": "opus",
+  "effortLevel": "high",
+  "permissions": {
+    "defaultMode": "bypassPermissions",
+    "allow": [
+      "Bash(*)",
+      "Read(*)",
+      "Write(*)",
+      "Edit(*)",
+      "MultiEdit(*)",
+      "Glob(*)",
+      "Grep(*)",
+      "WebFetch(*)",
+      "WebSearch",
+      "Task",
+      "LS",
+      "Bash(xargs grep -H \"down_revision\\\\|^revision \")",
+      "Bash(git -C \"D:/Projects/processity_supermarket_assignment\" status)"
+    ],
+    "deny": []
+  }
+}
