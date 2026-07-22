@@ -365,3 +365,59 @@ def test_invoice_numbers_are_sequential_and_fy_scoped(pid):
     seq = [int(n.split("/")[-1]) for n in nos]
     assert seq == [1, 2, 3]
     assert all(n.startswith("INV/") for n in nos)
+
+
+# --- recent_bills: turning "the last bill" into a bill_id --------------------
+
+def test_recent_bills_returns_finalized_newest_first(pid):
+    made = []
+    for name in ("Tata Salt 1kg", "Parle-G Biscuits 100g", "Amul Butter 100g"):
+        b = billing.start_bill(chat_id="c1")
+        billing.add_line(b["bill_id"], pid(name), 1)
+        made.append(billing.finalize_bill(b["bill_id"], "cash")["invoice_no"])
+
+    out = billing.recent_bills()
+    assert out["count"] == 3
+    # Newest first is the whole point: recent_bills()[0] must be "the last bill".
+    assert [b["invoice_no"] for b in out["bills"]] == list(reversed(made))
+    assert out["bills"][0]["payment_mode"] == "cash"
+
+
+def test_recent_bills_excludes_drafts(pid):
+    b = billing.start_bill(chat_id="c1")
+    billing.add_line(b["bill_id"], pid("Tata Salt 1kg"), 1)
+
+    out = billing.recent_bills()
+    assert out["count"] == 0, "a draft has no invoice, so it is not a past bill"
+
+
+def test_recent_bills_filters_by_customer(pid):
+    for who in ("Ramesh", "Suresh", "Ramesh"):
+        b = billing.start_bill(chat_id="c1", customer=who)
+        billing.add_line(b["bill_id"], pid("Tata Salt 1kg"), 1)
+        billing.finalize_bill(b["bill_id"], "khata", customer=who)
+
+    out = billing.recent_bills(customer="ramesh")   # case-insensitive
+    assert out["count"] == 2
+    assert {b["customer"] for b in out["bills"]} == {"Ramesh"}
+
+
+def test_recent_bills_reports_shop_local_time(pid):
+    b = billing.start_bill(chat_id="c1")
+    billing.add_line(b["bill_id"], pid("Tata Salt 1kg"), 1)
+    billing.finalize_bill(b["bill_id"], "cash")
+
+    stamp = billing.recent_bills()["bills"][0]["finalized_at"]
+    # "YYYY-MM-DD HH:MM" in shop time, not a UTC ISO string the model would misread.
+    assert len(stamp) == 16 and stamp[10] == " " and "T" not in stamp
+
+
+def test_recent_bills_limit_is_clamped(pid):
+    for _ in range(3):
+        b = billing.start_bill(chat_id="c1")
+        billing.add_line(b["bill_id"], pid("Tata Salt 1kg"), 1)
+        billing.finalize_bill(b["bill_id"], "cash")
+
+    assert billing.recent_bills(limit=2)["count"] == 2
+    assert billing.recent_bills(limit=999)["count"] == 3   # clamped, not an error
+    assert billing.recent_bills(limit=0)["count"] == 1     # floor of 1

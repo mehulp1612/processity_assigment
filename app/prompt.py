@@ -112,6 +112,8 @@ def _preferences_block(owner_id: str) -> str:
         "\n## Standing instructions from the owner\n"
         "These were set in earlier conversations and still apply. Follow them without\n"
         "being asked again, but let the owner override any of them in the moment.\n"
+        "Act on them in the turn they become relevant — mid-bill, mid-answer, whenever\n"
+        "it applies. They are instructions to follow, not notes to recite when asked.\n"
         f"{lines}\n"
     )
 

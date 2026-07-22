@@ -15,15 +15,12 @@ overstate profit by the tax rate on every line.
 
 from __future__ import annotations
 
-import os
 from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 from .. import db
-from .common import DomainError, row_to_dict
-
-SHOP_TZ = ZoneInfo(os.environ.get("SHOP_TIMEZONE", "Asia/Kolkata"))
+from .common import SHOP_TZ, DomainError, row_to_dict
 
 # Postgres expression turning a stored UTC timestamp into the shop's local date.
 _LOCAL_DATE = "((b.finalized_at::timestamptz) AT TIME ZONE %s)::date"

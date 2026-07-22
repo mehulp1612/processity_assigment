@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import os
 from datetime import date, datetime, timezone
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from psycopg.types.json import Jsonb
+
+# The shop's wall clock. Timestamps are stored in UTC, but a *day* is a shop-local
+# day — a sale at 00:30 IST belongs to that night's takings, not to yesterday's.
+# Defined once here because two modules disagreeing about the shop's timezone
+# would silently file sales under the wrong date.
+SHOP_TZ = ZoneInfo(os.environ.get("SHOP_TIMEZONE", "Asia/Kolkata"))
 
 
 class DomainError(Exception):

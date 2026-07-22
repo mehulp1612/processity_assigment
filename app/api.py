@@ -138,4 +138,12 @@ async def chat(request: Request):
             status_code=502, detail=f"Agent turn failed: {type(exc).__name__}: {exc}"
         ) from exc
 
-    return JSONResponse({"reply": reply})
+    # Telegram delivers queued files and clears the list; over HTTP there is
+    # nowhere to push a document, so report the paths and drain the queue. Left
+    # undrained they would accumulate on the session for the life of the chat.
+    files: list[str] = []
+    session = agent.peek_session(chat_id)
+    if session is not None:
+        files, session.turn.attachments = session.turn.attachments, []
+
+    return JSONResponse({"reply": reply, "files": files})

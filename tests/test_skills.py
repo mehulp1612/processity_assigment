@@ -48,7 +48,7 @@ def test_every_tool_has_a_unique_name_and_object_schema(turn):
     tools = skills.build_tools(turn)
     names = [t.name for t in tools]
     assert len(names) == len(set(names)), "duplicate tool names would shadow each other"
-    assert len(names) == 24
+    assert len(names) == 25
     for t in tools:
         assert t.input_schema["type"] == "object"
         assert t.description.strip(), f"{t.name} needs a description the model can act on"

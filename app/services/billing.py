@@ -16,6 +16,7 @@ stock under a write lock, and refuses rather than overselling.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Optional
 
 from .. import db
@@ -23,7 +24,7 @@ from ..domain.gst import compute_bill, bill_to_floats
 from ..domain.money import as_float
 from . import khata as khata_svc
 from .common import (
-    DomainError, cached_op, next_invoice_no, now_iso, record_op, row_to_dict,
+    SHOP_TZ, DomainError, cached_op, next_invoice_no, now_iso, record_op, row_to_dict,
 )
 
 PAYMENT_MODES = {"cash", "upi", "card", "khata"}
@@ -132,6 +133,40 @@ def open_draft(chat_id: str) -> Optional[dict]:
         if row is None:
             return None
         return _bill_view(cx, row["id"])
+
+
+def recent_bills(limit: int = 5, customer: Optional[str] = None) -> dict:
+    """Finalized bills, newest first.
+
+    Exists so "the last bill" is answerable. Without it the model has no way to
+    turn that phrase into a bill_id, and its only honest options are to ask the
+    owner or to guess an id — and guessing an id that resolves to a *real other
+    bill* is the worse failure, because it invoices the wrong customer silently.
+
+    Times come back in shop-local form so the model can say "the 6:40 pm one"
+    without doing timezone arithmetic it has no business doing.
+    """
+    limit = max(1, min(int(limit), 20))
+    sql = """SELECT id, invoice_no, customer, payment_mode, total, finalized_at
+               FROM bills
+              WHERE status = 'finalized'"""
+    params: list = []
+    if customer:
+        sql += " AND lower(customer) = lower(%s)"
+        params.append(customer.strip())
+    sql += " ORDER BY finalized_at DESC LIMIT %s"
+    params.append(limit)
+
+    with db.tx() as cx:
+        rows = cx.execute(sql, tuple(params)).fetchall()
+
+    for row in rows:
+        stamp = row.get("finalized_at")
+        if stamp:
+            row["finalized_at"] = (
+                datetime.fromisoformat(stamp).astimezone(SHOP_TZ).strftime("%Y-%m-%d %H:%M")
+            )
+    return {"ok": True, "bills": rows, "count": len(rows)}
 
 
 def view_bill(bill_id: int) -> dict:

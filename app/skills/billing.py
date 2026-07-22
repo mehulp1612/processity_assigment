@@ -52,6 +52,24 @@ def build_tools(turn: Turn) -> list:
             return await call(svc.open_draft, turn.chat_id)
         return await call(svc.view_bill, args["bill_id"])
 
+    @tool(
+        "recent_bills",
+        "List recently finalized bills, newest first, with invoice number, customer, "
+        "payment mode, total and shop-local time. Use this to resolve phrases like "
+        "'the last bill', 'that bill just now' or 'Ramesh's last purchase' into a "
+        "bill_id before viewing it or making its invoice PDF. Never guess a bill_id.",
+        {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "How many to return (default 5, max 20)."},
+                "customer": {"type": "string", "description": "Only this customer's bills."},
+            },
+            "required": [],
+        },
+    )
+    async def recent_bills(args: dict) -> dict:
+        return await call(svc.recent_bills, args.get("limit", 5), args.get("customer"))
+
 
     @tool(
         "add_line",
@@ -163,4 +181,5 @@ def build_tools(turn: Turn) -> list:
             allow_below_cost=args.get("allow_below_cost", False),
         )
 
-    return [start_bill, view_bill, add_line, set_line_qty, remove_line, cancel_bill, finalize_bill]
+    return [start_bill, view_bill, recent_bills, add_line, set_line_qty, remove_line,
+            cancel_bill, finalize_bill]

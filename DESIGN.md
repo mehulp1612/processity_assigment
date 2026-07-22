@@ -354,7 +354,40 @@ supermarket-agent/
    the file path to `Turn.attachments` rather than delivering it, so the document services never
    learn what Telegram is.
 8. **Memory** polish + end-to-end run of all §3 scenarios.
+   *Done.* Every scenario driven **through the model** over `/chat` (`scripts/scenarios.py`),
+   which is the path `scripts/smoke.py` cannot reach: smoke proves the services compute the right
+   numbers, this proves the agent *gets to them* from ordinary shopkeeper phrasing. Idempotency
+   was verified at the database rather than from the reply — a redelivered "cash" left one bill,
+   one payment row, one `processed_ops` entry and stock decremented exactly once; the model
+   *saying* "already finalized" would have proved nothing.
+   Two gaps this surfaced and closed: **"the last bill" was unanswerable** — no tool turned that
+   phrase into a `bill_id`, so the model correctly asked rather than guessing an id that would
+   have invoiced the wrong customer silently (added `recent_bills`, 25 tools); and `/chat` never
+   drained `Turn.attachments`, so generated files accumulated on the session and the caller was
+   never told a file existed.
+   `SHOP_TZ` moved to `services/common.py` — two modules disagreeing about the shop's timezone
+   would file sales under the wrong date.
+   *Known limitation:* preferences reliably **persist** across `/new` (rebuilt from Postgres, not
+   carried in context) and actionable ones change behaviour — a stored "default to UPI" shows up
+   in the next bill. But soft *"remind me about X"* instructions are applied inconsistently by
+   `laguna-s-2.1`; the instruction is verifiably in the system prompt and the model simply skips
+   it. Prompt wording was strengthened once; beyond that this is a model-capability ceiling, not
+   a defect in the memory layer, and it is recorded rather than tuned against.
 9. **README + recording script**; then deploy (tunnel/host).
+   *Deployed* to an always-on VM (AWS Lightsail) under `docker-compose.prod.yml` — see `DEPLOY.md`.
+   Long-polling is *outbound* traffic, so a scale-to-zero host would sleep the container and the
+   bot would never wake itself; an always-on VM removes that failure mode, and it means **no
+   inbound port but SSH** need be open. The prod compose is a standalone file, not an override:
+   Compose *concatenates* `ports` across `-f` files rather than replacing them, so an override
+   could not have un-published the dev file's `5432` and would have quietly left the database
+   listening on the public interface.
+   *Accepted risk, deliberately.* There is **no owner allowlist** — the evaluator's Telegram id
+   is unknown ahead of time, and a static allowlist would lock out the very person it is meant to
+   let in. The exposure is therefore anyone who finds the handle. Tampering is recoverable by
+   `pg_dump`/restore; the sharper risk is **model quota** — a stranger spamming the bot exhausts
+   the free tier and it goes silent mid-review. The mitigation if that is ever unacceptable is a
+   pairing code (`/start <code>`) printed beside the handle in the README, which needs no list of
+   owners in advance.
 
 Testable slices land early (phases 2–3 are pure-Python, no API key needed).
 
