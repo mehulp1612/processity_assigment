@@ -1,0 +1,80 @@
+# Production topology for a single always-on host (AWS Lightsail / EC2).
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# This is a **standalone** file, not an override of docker-compose.yml. Compose
+# concatenates `ports` across -f files rather than replacing them, so an override
+# could not have removed the dev file's published 5432 — it would have quietly
+# left the database listening on the public interface. A separate file costs a
+# little duplication and removes that entire class of mistake.
+#
+# Differences from the dev file, and why each one matters here:
+#   * no --reload and no source bind mounts — the image is the deployable
+#     artifact; a running shop must not change because someone edited a file
+#   * Postgres publishes no ports at all, and the API binds to loopback only
+#   * the database password comes from the environment instead of "postgres"
+#   * container logs are capped, because an unattended box that fills its disk
+#     stops trading
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: store
+    volumes:
+      # Named volume: `docker compose down` and image rebuilds leave it alone.
+      # Losing this is losing the shop's books.
+      - pgdata:/var/lib/postgresql/data
+    # Deliberately no `ports:`. The app reaches Postgres over the compose
+    # network; nothing outside this box has any business talking to it.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d store"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  app:
+    build: .
+    image: supermarket-ops-agent
+    env_file:
+      # Secrets live on the box, never in the image — .dockerignore excludes it.
+      - .env
+    environment:
+      # Overrides anything stale in .env; env_file loses to environment.
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/store
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      # Loopback only. The bot long-polls, so nothing needs to reach in — this
+      # exists for `curl localhost:8000/healthz` over SSH, not for the internet.
+      # Even if the instance firewall is opened by mistake, this stays private.
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # Generated invoices and decks, kept on the host so they survive a
+      # redeploy and can be inspected over SSH.
+      - ./out:/app/out
+    healthcheck:
+      # Reports liveness in `docker compose ps`. Note this does not restart a
+      # wedged process: `restart: unless-stopped` covers crashes and reboots,
+      # not hangs. For a single-instance shop bot that is the right trade.
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # First boot waits for Postgres, applies the schema and seeds the catalogue.
+      start_period: 90s
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  pgdata:

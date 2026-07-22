@@ -17,3 +17,6 @@ venv/
 # OS / editor
 .DS_Store
 Thumbs.db
+
+# Dead SQLite era leftovers
+data/
