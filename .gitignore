@@ -20,3 +20,6 @@ Thumbs.db
 
 # Dead SQLite era leftovers
 data/
+
+# Random Posted Files
+submission-email.md

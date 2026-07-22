@@ -15,7 +15,7 @@
 > tool surface thin *and* makes every invariant — oversell, idempotency, concurrency — provable
 > with ordinary unit tests, independent of what the model says.
 
-- Natural language → Claude → **tool calls**. No regex/keyword intent router anywhere on the hot path.
+- Natural language → the model → **tool calls**. No regex/keyword intent router anywhere on the hot path.
 - Every business invariant (oversell, GST math, idempotency, khata, "don't sell below cost")
   is enforced **inside the tool, in a DB transaction** — never "hoped for" in the prompt.
 - The prompt gives the agent *persona + policy + how to behave*; it gives the agent **no data** —
@@ -208,18 +208,22 @@ Tools are **thin, single-purpose, and validate at the boundary**. Signatures (Py
 - `low_stock()` → SKUs at/below reorder level.
 
 ### billing  (draft-in-DB, finalize is the only stock mutation)
-- `start_bill(chat_id, customer?)` → new draft, returns `bill_id`.
+- `start_bill(customer?)` → new draft, returns `bill_id`. (`chat_id` is bound by the turn, not passed by the model.)
 - `add_line(bill_id, product_id, qty)` → **soft** availability check + GST snapshot; recomputes totals.
-- `edit_line(bill_id, line_id|product_id, qty)` / `remove_line(...)` → supports "drop the butter, make it 6 Maggi".
+- `set_line_qty(bill_id, product_id, qty)` / `remove_line(...)` → supports "drop the butter, make it 6 Maggi".
 - `view_bill(bill_id)` → itemized preview with tax breakup.
-- `finalize_bill(bill_id, payment_mode, payment_ref?, update_id)` → **the critical tool**:
-  1. Idempotency: if `update_id` already in `processed_updates`, return the prior result.
+- `recent_bills(limit?, customer?)` → resolves "the last bill" / "Ramesh's last purchase" to a `bill_id`.
+  *(Added in phase 8; without it the model's only honest options were to ask or to guess an id,
+  and a guessed id resolves to a real other bill — invoicing the wrong customer silently.)*
+- `cancel_bill(bill_id)` → voids a draft. Finalized bills are never deleted.
+- `finalize_bill(bill_id, payment_mode, payment_ref?, allow_below_cost?)` → **the critical tool**:
+  1. Idempotency: if the turn's `op_key` is already in `processed_ops`, return the prior result.
   2. Open the transaction; re-fetch live stock; **oversell guard** (`qty >= line.qty` for every line, else refuse with the shortfall).
   3. **Below-cost guard**: if any `unit_price < cost_price`, refuse/flag for confirmation.
-  4. Recompute GST fresh (never trust the draft snapshot for money), decrement stock, write payment or khata debit, mark finalized, record `update_id`. `COMMIT`.
+  4. Recompute GST fresh (never trust the draft snapshot for money), decrement stock, write payment or khata debit, mark finalized, record the `op_key`. `COMMIT`.
 
 ### khata
-- `khata_add(customer, amount, bill_id?)` · `khata_settle(customer, amount)` (refuse if no such khata / overpay → confirm) · `khata_balance(customer)` · `khata_statement(customer)`.
+- `khata_add(customer, amount, bill_id?)` · `khata_settle(customer, amount)` (refuse if no such khata / overpay → confirm) · `khata_balance(customer)` · `khata_statement(customer)` · `list_khatas()` → everyone who owes.
 
 ### analytics
 - `daily_close(date?)` → totals, tax collected, cash vs UPI vs card, top items.
@@ -231,8 +235,14 @@ Tools are **thin, single-purpose, and validate at the boundary**. Signatures (Py
   stock health, GST collected) embedded as images. Returns file path.
 
 ### memory
-- `get_preferences(owner_id)` (loaded into the system prompt at session start) ·
-  `set_preference(owner_id, key, value)` ("always assume UPI", "default atta = Aashirvaad 5kg").
+- `get_preferences()` (also loaded into the system prompt at session start) ·
+  `set_preference(key, value)` ("always assume UPI", "default atta = Aashirvaad 5kg") ·
+  `forget_preference(key)`. `owner_id` is bound by the turn, not supplied by the model.
+
+**25 tools in total.** Two shapes recur and are deliberate: anything the *transport* knows
+(`chat_id`, `owner_id`, `op_key`) is closed over by the turn rather than declared as a model
+argument, and anything that would let the model wave a rule through (`allow_below_cost`) is a
+separate explicit flag the model must be told to set by the owner.
 
 ---
 
@@ -263,7 +273,7 @@ biscuits/soap/chocolate **12–18%**.
 | **Oversell guard** | `finalize_bill` re-checks live qty in-transaction, then decrements via a guarded `UPDATE … WHERE qty >= %s`; `rowcount != 1` aborts. Tool-layer, not prompt. |
 | **GST correctness** | §6 engine, computed in tool at finalize; per-slab breakup on invoice. |
 | **Multi-turn bills** | Draft `bills`/`bill_lines` rows; edits mutate the draft; **stock only moves at finalize**. |
-| **Idempotency** | `processed_updates(update_id)` PK + finalize returns cached result on retry → no double-bill. |
+| **Idempotency** | `processed_ops(op_key)` PK + finalize returns the cached result on retry → no double-bill. |
 | **Concurrency** | Postgres row locks serialize sale vs sale and sale vs stock-in; stock rows are locked in `product_id` order to avoid deadlocks. |
 | **Guardrails** | Below-cost refuse/confirm; khata settle refuses unknown customer/overpay; no destructive stock delete tool. |
 | **Real artifacts** | ReportLab PDF + python-pptx/matplotlib deck, produced by tools, uploaded by the bot. |
@@ -273,9 +283,10 @@ biscuits/soap/chocolate **12–18%**.
 
 ## 8. Control loop (what one message does)
 
-1. Telegram update arrives with `update_id`; bot routes to the `chat_id`'s `ClaudeSDKClient`.
-2. `client.query(owner_text)` — model observes, reasons, calls tools (possibly several in one turn:
-   `find_product` → `add_line` → `view_bill`).
+1. Telegram update arrives with `update_id`; bot routes to the `chat_id`'s agent session and
+   stamps `tg:<update_id>` onto the turn as its `op_key`.
+2. `Agent.run(owner_text, message_history=…)` — model observes, reasons, calls tools (possibly
+   several in one turn: `find_product` → `add_line` → `view_bill`).
 3. Each tool result feeds back; model continues until it has a final natural-language reply
    (or a document to send). Bot streams the reply; uploads any generated file.
 4. All money/stock effects already committed to Postgres inside the tools.
@@ -285,33 +296,41 @@ biscuits/soap/chocolate **12–18%**.
 ## 9. Project layout
 
 ```
-supermarket-agent/
-  app/
-    bot.py                # Telegram long-poll, per-chat session registry, /new, file upload
-    agent.py             # ClaudeSDKClient wiring, system prompt assembly, pref loading
-    db.py                # psycopg pool, schema bootstrap, tx helper
-    api.py               # FastAPI: /healthz, Telegram webhook, /chat — transport only
-    prompts/system.md    # persona + policy (NO data)
-    services/            # RULES live here (plain Python, DB-backed, no SDK import)
-      common.py          # DomainError, idempotency ledger, FY invoice numbers
-      inventory.py       # catalogue + stock
-      billing.py         # drafts + finalize (the crown jewel)
-      khata.py
-      analytics.py
-      documents.py       # pdf.py + pptx.py helpers
-      memory.py
-    skills/              # thin @tool adapters over services/ (arg mapping + formatting)
-      inventory.py · billing.py · khata.py · analytics.py · documents.py · memory.py
-    domain/
-      gst.py             # pure GST math (unit-tested)
-      money.py           # rounding helpers
-  (Postgres runs as its own container; data lives in the `pgdata` volume)
-  scripts/seed.py        # realistic SKUs + slabs + opening stock
-  tests/                 # gst math, oversell, idempotency, concurrency
-  .env.example           # ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN
-  README.md              # ~1 page: harness/why, control loop, tool design, hard parts
-  requirements.txt
+app/
+  bot.py               # Telegram long-poll, per-chat sessions, /new, file delivery
+  agent.py             # Pydantic AI wiring, per-chat session registry, Turn binding
+  prompt.py            # persona + policy, assembled per session (NO data)
+  api.py               # FastAPI: /healthz, /telegram/webhook, /chat — transport only
+  cli.py               # drive the agent from a terminal, no Telegram needed
+  db.py                # psycopg pool, schema bootstrap, tx helper
+  schema.sql
+  services/            # RULES live here (plain Python, DB-backed, no SDK import)
+    common.py          # DomainError, SHOP_TZ, idempotency ledger, FY invoice numbers
+    inventory.py       # catalogue + stock
+    billing.py         # drafts + finalize (the crown jewel)
+    khata.py · analytics.py · memory.py
+    documents.py       # ReportLab GST invoice
+    deck.py            # python-pptx + matplotlib analysis deck
+  skills/              # thin tool adapters over services/ (arg mapping + formatting)
+    _tool.py           # StoreTool descriptor — keeps skills harness-agnostic
+    _result.py         # uniform ok/error envelope
+    context.py         # the per-turn Turn (chat_id, owner_id, op_key, attachments)
+    inventory.py · billing.py · khata.py · analytics.py · documents.py · memory.py
+  domain/
+    gst.py             # pure GST math (unit-tested, no DB)
+    money.py           # rounding + amount-in-words (lakh/crore)
+scripts/
+  seed.py              # 17 realistic SKUs across 0/5/12/18% slabs + opening stock
+  smoke.py             # exercises services/ directly — proves the numbers
+  scenarios.py         # drives the same scenarios through the model over /chat
+  entrypoint.sh        # wait for Postgres, apply schema, seed if empty
+tests/                 # gst math, oversell, idempotency, concurrency, khata, documents
+README.md · DESIGN.md · DEPLOY.md
+docker-compose.yml · docker-compose.prod.yml · Dockerfile · .env.example
 ```
+
+Postgres runs as its own container; data lives in the `pgdata` volume, which `docker compose
+down` and image rebuilds both leave alone.
 
 ---
 
@@ -373,7 +392,13 @@ supermarket-agent/
    `laguna-s-2.1`; the instruction is verifiably in the system prompt and the model simply skips
    it. Prompt wording was strengthened once; beyond that this is a model-capability ceiling, not
    a defect in the memory layer, and it is recorded rather than tuned against.
-9. **README + recording script**; then deploy (tunnel/host).
+9. **README + recording**; then deploy (tunnel/host).
+   *Done.* `README.md` is the ~1-page brief-facing document (harness and why, where the rules
+   live, the hard-parts table, the known limitation, the open questions); this file stays the
+   long-form reasoning and `DEPLOY.md` the runbook. §5 and §9 above were re-synced with the
+   code at this point — they still described the pre-migration plan (`edit_line`,
+   `processed_updates`, `ClaudeSDKClient`, a `prompts/system.md` that never existed), and a
+   design doc that disagrees with the repo is worse than no design doc.
    *Deployed* to an always-on VM (AWS Lightsail) under `docker-compose.prod.yml` — see `DEPLOY.md`.
    Long-polling is *outbound* traffic, so a scale-to-zero host would sleep the container and the
    bot would never wake itself; an always-on VM removes that failure mode, and it means **no
